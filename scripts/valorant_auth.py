@@ -7,7 +7,7 @@ cookie-based refresh for the GitHub Action).
 import datetime as _dt
 import re
 import time
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 import requests
 
@@ -98,20 +98,52 @@ def extract_access_token(url: str) -> str:
     return params["access_token"][0]
 
 
-def reauth_with_cookies(session: requests.Session) -> str | None:
-    """Silently mints a fresh access token from cookies already on the session
-    (no username/password/2FA needed). Returns None if the cookies are no
-    longer valid and a full interactive login is required.
-    """
-    resp = session.get(AUTHORIZE_URL, allow_redirects=False, timeout=15)
-    if resp.status_code >= 400:
-        raise AuthError(f"Riot a refusé la connexion (HTTP {resp.status_code}).")
-    location = resp.headers.get("Location", "")
-    if "access_token" not in location:
-        return None
-    if urlparse(location).hostname != "playvalorant.com":
-        raise AuthError("Riot a renvoyé une redirection de connexion inattendue.")
-    return extract_access_token(location)
+def reauth_with_cookies(session: requests.Session) -> str:
+    """Follow Riot's ordinary auth redirects; report refusals without secrets."""
+    url = AUTHORIZE_URL
+    visited = set()
+    for _ in range(4):
+        if url in visited:
+            raise AuthError("Riot renvoie une boucle de connexion ; aucun jeton délivré.")
+        visited.add(url)
+        resp = session.get(url, allow_redirects=False, timeout=15)
+        status = resp.status_code
+        if resp.headers.get("cf-mitigated", "").lower() == "challenge":
+            raise AuthError(
+                f"Riot demande une vérification interactive depuis GitHub (HTTP {status}). "
+                "Le checker ne peut pas terminer cette connexion automatiquement."
+            )
+        if status >= 400:
+            raise AuthError(f"Riot a refusé la connexion depuis GitHub (HTTP {status}).")
+        location = resp.headers.get("Location", "")
+        if not location:
+            kind = "HTML" if "html" in resp.headers.get("Content-Type", "").lower() else "sans redirection"
+            raise AuthError(
+                f"Riot ne délivre pas de jeton (HTTP {status}, réponse {kind}). "
+                "Cela ne prouve pas que le ssid a expiré."
+            )
+        target = urljoin(url, location)
+        parsed = urlparse(target)
+        parameters = parse_qs(parsed.fragment)
+        if "access_token" in parameters:
+            if parsed.scheme != "https" or parsed.hostname != "playvalorant.com":
+                raise AuthError("Riot a renvoyé une redirection de connexion inattendue.")
+            return extract_access_token(target)
+        if (parsed.hostname in {"auth.riotgames.com", "authenticate.riotgames.com"}
+                and (parsed.path == "/login" or parsed.path.startswith("/login/"))):
+            raise AuthError(
+                f"Riot renvoie vers sa page de connexion (HTTP {status}). "
+                "Le cookie fourni n'est pas accepté pour ce lancement depuis GitHub ; "
+                "cela ne prouve pas qu'il a expiré. Vérifie sa copie complète."
+            )
+        if parsed.scheme != "https" or parsed.hostname not in {
+            "auth.riotgames.com", "authenticate.riotgames.com"
+        }:
+            raise AuthError(
+                f"Riot ne délivre pas de jeton et renvoie une redirection inattendue (HTTP {status})."
+            )
+        url = target
+    raise AuthError("Riot ne délivre pas de jeton après ses redirections de connexion.")
 
 
 def checked_json(response: requests.Response, context: str) -> dict:

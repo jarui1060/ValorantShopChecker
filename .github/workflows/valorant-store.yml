@@ -6,6 +6,10 @@ on:
     # 01:17 in Belgium in winter, 02:17 in summer. Runs can start late.
     - cron: "17 0 * * *"
   workflow_dispatch: {}
+  # Test merged configuration changes on master, with the same cache scope.
+  pull_request:
+    branches: [master]
+    types: [closed]
   push:
     branches: [master]
     paths:
@@ -23,6 +27,7 @@ concurrency:
 
 jobs:
   check-store:
+    if: github.event_name != 'pull_request' || (github.event.pull_request.merged == true && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

@@ -91,7 +91,7 @@ class AuthTests(unittest.TestCase):
 
     def test_blocked_auth_is_not_treated_as_expired_cookie(self):
         session = Mock()
-        session.get.return_value = Mock(status_code=403)
+        session.get.return_value = Mock(status_code=403, headers={})
         with self.assertRaisesRegex(auth.AuthError, "HTTP 403"):
             auth.reauth_with_cookies(session)
         session.get.assert_called_once()
@@ -139,6 +139,53 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(fetch.call_args.args[2], "eu")
             self.assertEqual(post.call_args.args[1], "Boutique de test")
             self.assertIn("enregistré par Discord", output.getvalue())
+
+
+class DiagnosticTests(unittest.TestCase):
+    def test_cookie_pair_prefix_is_normalized(self):
+        self.assertEqual(checker.parse_cookies('{"ssid":" ssid=fake-complete-cookie "}')["ssid"],
+                         "fake-complete-cookie")
+
+    def test_truncated_or_header_copies_are_rejected(self):
+        for value in ["eyJabc...", "eyJabc…", "one; another=two", "with spaces"]:
+            with self.subTest(value=value), self.assertRaises(checker.CheckerError):
+                checker.parse_cookies(json.dumps({"ssid": value}))
+
+    def test_intermediate_riot_redirect_is_followed(self):
+        session = Mock()
+        session.get.side_effect = [
+            Mock(status_code=302, headers={"Location": "/authorize?step=2"}),
+            Mock(status_code=302, headers={"Location": "https://playvalorant.com/opt_in#access_token=fake-token"}),
+        ]
+        self.assertEqual(auth.reauth_with_cookies(session), "fake-token")
+        self.assertEqual(session.get.call_count, 2)
+
+    def test_login_redirect_does_not_claim_the_cookie_expired(self):
+        session = Mock()
+        session.get.return_value = Mock(status_code=302, headers={
+            "Location": "https://authenticate.riotgames.com/login?private=fake-private-value"})
+        with self.assertRaises(auth.AuthError) as error:
+            auth.reauth_with_cookies(session)
+        self.assertIn("page de connexion", str(error.exception))
+        self.assertNotIn("fake-private-value", str(error.exception))
+        self.assertNotIn("session a expiré", str(error.exception))
+
+    def test_html_response_does_not_leak_body(self):
+        session = Mock()
+        session.get.return_value = Mock(status_code=200, headers={"Content-Type": "text/html"},
+                                        text="private-body-with-cookie")
+        with self.assertRaises(auth.AuthError) as error:
+            auth.reauth_with_cookies(session)
+        self.assertIn("HTTP 200", str(error.exception))
+        self.assertIn("HTML", str(error.exception))
+        self.assertNotIn("private-body-with-cookie", str(error.exception))
+
+    def test_interactive_challenge_is_not_retried(self):
+        session = Mock()
+        session.get.return_value = Mock(status_code=403, headers={"cf-mitigated": "challenge"})
+        with self.assertRaisesRegex(auth.AuthError, "vérification interactive"):
+            auth.reauth_with_cookies(session)
+        session.get.assert_called_once()
 
 
 if __name__ == "__main__":
