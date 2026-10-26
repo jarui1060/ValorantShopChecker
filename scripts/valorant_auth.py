@@ -104,23 +104,24 @@ def reauth_with_cookies(session: requests.Session) -> str | None:
     longer valid and a full interactive login is required.
     """
     resp = session.get(AUTHORIZE_URL, allow_redirects=False, timeout=15)
+    if resp.status_code >= 400:
+        raise AuthError(f"Riot a refusé la connexion (HTTP {resp.status_code}).")
     location = resp.headers.get("Location", "")
     if "access_token" not in location:
         return None
+    if urlparse(location).hostname != "playvalorant.com":
+        raise AuthError("Riot a renvoyé une redirection de connexion inattendue.")
     return extract_access_token(location)
 
 
 def checked_json(response: requests.Response, context: str) -> dict:
     """Parses a response as JSON, or raises with a clear diagnostic if it isn't."""
+    if not response.ok:
+        raise AuthError(f"[{context}] Riot a refusé la requête (HTTP {response.status_code}).")
     try:
         return response.json()
     except ValueError:
-        raise AuthError(
-            f"[{context}] request failed — HTTP {response.status_code}\n"
-            f"Response body: {response.text[:500]!r}\n"
-            "This usually means the access token is missing/expired, the region "
-            "is wrong, or Riot changed the endpoint."
-        )
+        raise AuthError(f"[{context}] Réponse Riot illisible (HTTP {response.status_code}).") from None
 
 
 def get_client_version() -> str:
@@ -133,7 +134,7 @@ def get_client_version() -> str:
 def get_skin_names() -> dict:
     """Maps item (skin level) UUIDs -> display names, best-effort."""
     try:
-        data = requests.get(SKINLEVELS_URL, timeout=10).json()["data"]
+        data = requests.get(SKINLEVELS_URL, params={"language": "fr-FR"}, timeout=10).json()["data"]
         return {item["uuid"].lower(): item["displayName"] for item in data}
     except Exception:
         return {}
@@ -142,10 +143,10 @@ def get_skin_names() -> dict:
 def game_headers(session: requests.Session, access_token: str) -> tuple[dict, str]:
     """Builds the auth headers for pd.{region} game endpoints. Returns (headers, puuid)."""
     headers = {"Authorization": f"Bearer {access_token}"}
-    entitlements_resp = session.post(ENTITLEMENTS_URL, headers=headers, json={})
+    entitlements_resp = session.post(ENTITLEMENTS_URL, headers=headers, json={}, timeout=20)
     entitlements_token = checked_json(entitlements_resp, "entitlements")["entitlements_token"]
 
-    userinfo_resp = session.post(USERINFO_URL, headers=headers, json={})
+    userinfo_resp = session.post(USERINFO_URL, headers=headers, json={}, timeout=20)
     puuid = checked_json(userinfo_resp, "userinfo")["sub"]
 
     headers["X-Riot-Entitlements-JWT"] = entitlements_token
@@ -180,7 +181,7 @@ def get_map_names() -> dict:
 def store_front(session: requests.Session, headers: dict, puuid: str, region: str) -> dict:
     # v2 (GET) was deprecated by Riot in favor of v3 (POST).
     store_url = f"https://pd.{region}.a.pvp.net/store/v3/storefront/{puuid}"
-    return checked_json(session.post(store_url, headers=headers, json={}), "store")
+    return checked_json(session.post(store_url, headers=headers, json={}, timeout=20), "store")
 
 
 def competitive_updates(
@@ -406,7 +407,7 @@ def fetch_competitive(
 def format_store_lines(store: dict) -> list[str]:
     """Human-readable lines describing the store: daily offers + featured bundle."""
     if "SkinsPanelLayout" not in store:
-        return [f"Unexpected store response: {store}"]
+        raise AuthError("Riot n'a pas renvoyé la boutique attendue.")
 
     names = get_skin_names()
     lines = []
@@ -416,7 +417,7 @@ def format_store_lines(store: dict) -> list[str]:
     seconds_left = panel.get("SingleItemOffersRemainingDurationInSeconds", 0)
     h, r = divmod(seconds_left, 3600)
     m = r // 60
-    lines.append(f"**Daily store** (refreshes in {h}h {m}m):")
+    lines.append(f"🛒 **Ta boutique VALORANT** · renouvellement dans {h} h {m} min")
     for offer_id in offers:
         lines.append(f"- {names.get(offer_id.lower(), offer_id)}")
 
@@ -429,10 +430,10 @@ def format_store_lines(store: dict) -> list[str]:
         )
         h, r = divmod(remaining, 3600)
         m = r // 60
-        lines.append(f"\n**Featured bundle** (expires in {h}h {m}m):")
+        lines.append(f"\n**Collection en vedette** · fin dans {h} h {m} min")
         for entry in bundle.get("Items", []):
             item_id = entry["Item"]["ItemID"]
-            lines.append(f"- {names.get(item_id.lower(), item_id)} (base price: {entry['BasePrice']})")
+            lines.append(f"- {names.get(item_id.lower(), item_id)} ({entry['BasePrice']} VP avant remise)")
 
     return lines
 
@@ -487,7 +488,7 @@ def cookies_to_dict(session: requests.Session) -> dict:
     return {
         c.name: c.value
         for c in session.cookies
-        if c.domain.endswith("riotgames.com")
+        if c.domain.lstrip(".") == "riotgames.com" or c.domain.endswith(".riotgames.com")
     }
 
 

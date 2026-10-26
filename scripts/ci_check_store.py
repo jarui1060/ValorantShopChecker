@@ -1,104 +1,136 @@
-"""
-Unattended store check for the GitHub Action.
-
-Reads a saved Riot session (RIOT_COOKIES secret) and silently mints a fresh
-access token from it — no username/password/2FA involved. Posts the result
-to a Discord webhook, and writes the (possibly rotated) cookies back out as
-a GITHUB_OUTPUT so the workflow can refresh the RIOT_COOKIES secret for next
-time.
-
-Required environment variables:
-    RIOT_COOKIES         JSON dict of cookie name -> value (from bootstrap_cookies.py)
-    DISCORD_WEBHOOK_URL  Discord webhook to post the store to
-Optional:
-    REGION               Shard/region, defaults to "na"
-"""
+"""Publish the EU shop to Discord and retain rotated Riot cookies encrypted."""
+import base64
+import hashlib
 import json
 import os
+from pathlib import Path
 import sys
+from urllib.parse import urlsplit
 
+from cryptography.fernet import Fernet, InvalidToken
 import requests
 
 from valorant_auth import (
-    AuthError,
-    cookies_from_dict,
-    cookies_to_dict,
-    fetch_store,
-    format_store_lines,
-    reauth_with_cookies,
+    AuthError, cookies_from_dict, cookies_to_dict, fetch_store,
+    format_store_lines, reauth_with_cookies,
 )
 
 
+class CheckerError(Exception):
+    """A diagnostic that is safe to display without credentials."""
+
+
+def parse_cookies(value: str) -> dict:
+    try:
+        cookies = json.loads(value)
+    except (ValueError, TypeError):
+        raise CheckerError('RIOT_COOKIES doit contenir un JSON comme {"ssid":"..."}.') from None
+    if (not isinstance(cookies, dict) or not cookies.get("ssid")
+            or any(not isinstance(k, str) or not isinstance(v, str)
+                   for k, v in cookies.items())):
+        raise CheckerError("RIOT_COOKIES doit contenir un cookie ssid non vide.")
+    return cookies
+
+
+def session_cipher(seed: dict) -> Fernet:
+    # ssid is a high-entropy credential, not a human-chosen password.
+    key = hashlib.sha256(b"valorant-session-v1\0" + seed["ssid"].encode()).digest()
+    return Fernet(base64.urlsafe_b64encode(key))
+
+
+def load_session(seed: dict, path: Path) -> dict:
+    if path.is_file():
+        try:
+            return parse_cookies(session_cipher(seed).decrypt(path.read_bytes()).decode())
+        except (InvalidToken, OSError, UnicodeError, CheckerError):
+            print("Sauvegarde incompatible avec le secret actuel ; utilisation du secret.")
+    return seed
+
+
+def save_session(seed: dict, cookies: dict, path: Path) -> None:
+    payload = session_cipher(seed).encrypt(json.dumps(cookies).encode())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_bytes(payload)
+    temporary.chmod(0o600)
+    temporary.replace(path)
+
+
+def validate_webhook(value: str) -> bool:
+    try:
+        url = urlsplit(value)
+        return (url.scheme == "https" and url.hostname in {"discord.com", "discordapp.com"}
+                and url.path.startswith("/api/webhooks/")
+                and not url.username and not url.password)
+    except ValueError:
+        return False
+
+
 def post_to_discord(webhook_url: str, content: str) -> None:
-    # Discord message content is capped at 2000 chars.
-    for i in range(0, len(content), 2000):
-        requests.post(webhook_url, json={"content": content[i : i + 2000]}, timeout=15)
+    for offset in range(0, len(content), 2000):
+        try:
+            response = requests.post(
+                webhook_url, params={"wait": "true"},
+                json={"content": content[offset:offset + 2000],
+                      "allowed_mentions": {"parse": []}}, timeout=20,
+            )
+        except requests.RequestException:
+            raise CheckerError("Impossible de joindre Discord ; aucun envoi confirmé.") from None
+        if not response.ok:
+            raise CheckerError(f"Discord a refusé le message (HTTP {response.status_code}).")
+        try:
+            confirmed = response.json().get("id")
+        except (ValueError, AttributeError):
+            confirmed = None
+        if not confirmed:
+            raise CheckerError("Discord n'a pas confirmé l'enregistrement du message.")
 
 
-def write_github_output(name: str, value: str) -> None:
-    output_path = os.environ.get("GITHUB_OUTPUT")
-    if not output_path:
-        return
-    delimiter = "GHADELIM"
-    with open(output_path, "a", encoding="utf-8") as f:
-        f.write(f"{name}<<{delimiter}\n{value}\n{delimiter}\n")
-
-
-def main():
-    cookies_json = (os.environ.get("RIOT_COOKIES") or "").strip()
-    webhook_url = (os.environ.get("DISCORD_WEBHOOK_URL") or "").strip()
-    region = os.environ.get("REGION", "na")
-
-    if not webhook_url:
-        print("DISCORD_WEBHOOK_URL secret is missing or empty.", file=sys.stderr)
-        sys.exit(1)
-
-    if not cookies_json:
-        msg = (
-            "⚠️ Valorant store check: the RIOT_COOKIES secret is empty. Run "
-            "`python scripts/bootstrap_cookies.py` locally, then paste the JSON it "
-            "prints into the RIOT_COOKIES repo secret."
-        )
-        print(msg, file=sys.stderr)
-        post_to_discord(webhook_url, msg)
-        sys.exit(1)
-
+def main() -> int:
+    webhook = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
+    if not validate_webhook(webhook):
+        print("Le secret DISCORD_WEBHOOK_URL est absent ou incorrect.", file=sys.stderr)
+        return 1
     try:
-        cookies = json.loads(cookies_json)
-    except json.JSONDecodeError:
-        msg = (
-            "⚠️ Valorant store check: the RIOT_COOKIES secret isn't valid JSON. It "
-            "must be the exact JSON blob printed by `bootstrap_cookies.py`, e.g. "
-            '{"ssid": "...", "tdid": "..."} — with no extra quotes or line breaks.'
-        )
-        print(msg, file=sys.stderr)
-        post_to_discord(webhook_url, msg)
-        sys.exit(1)
-
-    session = requests.Session()
-    cookies_from_dict(session, cookies)
-
-    access_token = reauth_with_cookies(session)
-    if access_token is None:
-        post_to_discord(
-            webhook_url,
-            "⚠️ Valorant store check: the saved Riot session has expired. "
-            "Run `python scripts/bootstrap_cookies.py` locally and update the "
-            "RIOT_COOKIES secret to fix this.",
-        )
-        sys.exit(1)
-
+        seed = parse_cookies(os.environ.get("RIOT_COOKIES", ""))
+        region = os.environ.get("REGION", "eu").strip().lower()
+        if region not in {"eu", "na", "ap", "kr", "br", "latam"}:
+            raise CheckerError("La région configurée est incorrecte.")
+        path = Path(os.environ.get("RIOT_SESSION_FILE", "../.state/riot-session.enc"))
+        with requests.Session() as session:
+            cookies_from_dict(session, load_session(seed, path))
+            token = reauth_with_cookies(session)
+            if not token:
+                raise CheckerError(
+                    "La session Riot n'est plus acceptée. Récupère un nouveau ssid "
+                    "et remplace le secret RIOT_COOKIES."
+                )
+            # Preserve rotation even if fetching the store or delivering it fails.
+            save_session(seed, cookies_to_dict(session), path)
+            store = fetch_store(session, token, region)
+            panel = store.get("SkinsPanelLayout") if isinstance(store, dict) else None
+            offers = panel.get("SingleItemOffers") if isinstance(panel, dict) else None
+            if not isinstance(offers, list) or not offers or not all(isinstance(x, str) for x in offers):
+                raise CheckerError("Riot n'a pas renvoyé les offres de la boutique attendues.")
+            content = "\n".join(format_store_lines(store))
+        post_to_discord(webhook, content)
+    except (CheckerError, AuthError) as error:
+        message = str(error)
+    except requests.RequestException:
+        message = "Connexion à Riot impossible ou délai dépassé. Le prochain passage réessaiera."
+    except Exception:
+        # No response bodies, request URLs, tokens, or cookies in logs.
+        message = "Erreur inattendue du checker ; aucune donnée de connexion n'est affichée."
+    else:
+        print("Boutique récupérée ; message enregistré par Discord.")
+        return 0
+    print(message, file=sys.stderr)
     try:
-        store = fetch_store(session, access_token, region)
-    except AuthError as e:
-        post_to_discord(webhook_url, f"⚠️ Valorant store check failed: {e}")
-        sys.exit(1)
-
-    post_to_discord(webhook_url, "\n".join(format_store_lines(store)))
-
-    # Riot may rotate the session cookie on reauth; persist whatever's current.
-    write_github_output("cookies", json.dumps(cookies_to_dict(session)))
+        post_to_discord(webhook, "⚠️ Boutique VALORANT : " + message)
+    except CheckerError:
+        print("L'alerte n'a pas pu être envoyée à Discord.", file=sys.stderr)
+    return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

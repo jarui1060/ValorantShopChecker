@@ -1,14 +1,29 @@
 name: Valorant Store Check
 
 on:
-  # 01:00 UTC ~= 5pm PST (shifts to ~6pm during PDT; cron doesn't follow DST).
   schedule:
-    - cron: "0 1 * * *"
+    # 01:17 in Belgium in winter, 02:17 in summer. Runs can start late.
+    - cron: "17 0 * * *"
   workflow_dispatch: {}
+  push:
+    branches: [master]
+    paths:
+      - ".github/workflows/valorant-store.yml"
+      - "scripts/**"
+      - "tests/**"
+      - "requirements.txt"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: valorant-store
+  cancel-in-progress: false
 
 jobs:
   check-store:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -16,20 +31,30 @@ jobs:
         with:
           python-version: "3.11"
 
-      - run: pip install -r requirements.txt
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
 
-      - name: Fetch store and notify Discord
-        id: store
+      - name: Run offline checks
+        run: python -m unittest discover -s tests -v
+
+      - name: Restore encrypted Riot session
+        uses: actions/cache/restore@v4
+        with:
+          path: .state/riot-session.enc
+          key: riot-session-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: riot-session-v1-
+
+      - name: Fetch EU store and notify Discord
         working-directory: scripts
         env:
           RIOT_COOKIES: ${{ secrets.RIOT_COOKIES }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          REGION: na
+          REGION: eu
         run: python ci_check_store.py
 
-      - name: Persist refreshed session cookies
-        if: always() && steps.store.outputs.cookies != ''
-        env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}
-          COOKIES: ${{ steps.store.outputs.cookies }}
-        run: gh secret set RIOT_COOKIES --body "$COOKIES"
+      - name: Save encrypted refreshed session
+        if: always() && hashFiles('.state/riot-session.enc') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: .state/riot-session.enc
+          key: riot-session-v1-${{ github.run_id }}-${{ github.run_attempt }}

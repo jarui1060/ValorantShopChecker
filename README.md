@@ -1,59 +1,63 @@
-# Valorant Shop Checker
+# Boutique VALORANT vers Discord
 
-Check your Valorant store from the command line, or have a scheduled GitHub
-Action post your daily shop to Discord automatically.
+GitHub Actions consulte la boutique personnelle du compte Riot puis la publie
+via un webhook Discord. Le PC peut rester éteint. Région : **Europe (eu)**.
 
-## Local use
+## Configuration
 
-```bash
-pip install -r requirements.txt
-python scripts/check_store.py
-```
+Dans votre copie : **Settings → Secrets and variables → Actions**, ajouter :
 
-You'll be prompted to either paste a login redirect URL from your browser, or
-log in with your Riot username/password (with a 2FA prompt if enabled). Your
-credentials only ever go to Riot's own auth servers.
+| Repository secret | Valeur |
+| --- | --- |
+| RIOT_COOKIES | {"ssid":"VALEUR_COMPLETE_DU_COOKIE_RIOT"} |
+| DISCORD_WEBHOOK_URL | L'adresse complète du webhook du salon Discord |
 
-Pass a different region if you're not on NA:
+Le cookie doit venir de auth.riotgames.com. Ne jamais placer sa valeur ou le
+webhook dans les fichiers du dépôt, une capture ou un message. Le mot de passe
+Riot et un jeton personnel GitHub (GH_PAT) ne sont pas nécessaires.
 
-```bash
-python scripts/check_store.py --region eu   # na, eu, ap, kr
-```
+## Premier lancement
 
-## Automated Discord notifier (GitHub Action)
+Dans **Actions**, autoriser les workflows de cette copie si GitHub le demande.
+Sélectionner **Valorant Store Check → Run workflow → master → Run workflow**.
+Un succès affiche « Boutique récupérée ; message enregistré par Discord ».
+La récupération réelle n'est confirmée qu'après ce premier succès.
 
-The included workflow (`.github/workflows/valorant-store.yml`) runs daily and
-posts your shop to a Discord webhook. Because the Action runs unattended, it
-can't answer a 2FA prompt — instead it reuses a saved Riot session.
+Les modifications du programme sur master déclenchent également un passage.
+Le workflow n'est jamais lancé sur une pull request d'un contributeur externe.
 
-### One-time setup
+## Horaire
 
-1. **Seed a reusable session** (run locally):
+Passage prévu chaque jour à **00:17 UTC**, soit **01:17 en Belgique en hiver**
+et **02:17 en été**. GitHub peut démarrer un passage avec du retard.
+Dans un dépôt public, GitHub peut désactiver la planification après 60 jours
+sans activité : vérifier alors Actions et réactiver le workflow.
 
-   ```bash
-   python scripts/bootstrap_cookies.py
-   ```
+## Session renouvelée
 
-   Log in once; it prints a JSON blob of session cookies.
+Riot peut renouveler ses cookies. Le checker conserve la session renouvelée
+chiffrée avec Fernet dans le cache GitHub Actions. La clé est dérivée du ssid
+initial déjà enregistré dans les secrets. Aucun cookie ne figure dans les
+sorties du workflow, dans les messages Discord ou dans les fichiers du dépôt.
+Aucun GH_PAT n'est utilisé ; un éventuel ancien secret de ce nom est ignoré.
 
-2. **Add three repo secrets** (Settings → Secrets and variables → Actions):
+Si Riot invalide la session, récupérer un nouveau ssid et remplacer
+RIOT_COOKIES. Le nouveau secret réinitialise la sauvegarde chiffrée.
+Le cache est temporaire : s'il disparaît, le checker réessaie le cookie initial
+et peut demander une reconnexion.
 
-   | Secret | Value |
-   | --- | --- |
-   | `RIOT_COOKIES` | the JSON printed by `bootstrap_cookies.py` |
-   | `DISCORD_WEBHOOK_URL` | a Discord channel webhook URL |
-   | `GH_PAT` | a classic PAT with `repo` scope (lets the workflow refresh `RIOT_COOKIES` when Riot rotates the cookie) |
+## Tests sans connexion
 
-3. **Test it** — Actions tab → *Valorant Store Check* → *Run workflow*.
+    python -m pip install -r requirements.txt
+    python -m unittest discover -s tests -v
 
-The schedule is `0 1 * * *` (01:00 UTC ≈ 5pm PST). Adjust the `cron` in the
-workflow if your store resets at a different time. Note cron doesn't follow
-DST, so it shifts by an hour between PST/PDT.
+## Limites
 
-If Riot's session eventually expires, the Action posts a warning to Discord —
-just rerun `bootstrap_cookies.py` and update the `RIOT_COOKIES` secret.
+Outil communautaire non approuvé par Riot pour le suivi de boutique. Riot peut
+changer ses interfaces ou refuser les connexions depuis GitHub. Le cookie donne
+un accès sensible au compte, au-delà de la boutique. Sa validité dans un
+navigateur ne garantit pas qu'il sera accepté par GitHub : le premier passage
+sert à le vérifier.
 
-## Credits
-
-Auth flow and store endpoint based on the community
-[ValorantClientAPI](https://github.com/HeyM1ke/ValorantClientAPI) docs.
+Basé sur [Turtdle/ValorantShopChecker](https://github.com/Turtdle/ValorantShopChecker)
+et les informations [ValorantClientAPI](https://github.com/HeyM1ke/ValorantClientAPI).
