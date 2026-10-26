@@ -29,6 +29,14 @@ def parse_cookies(value: str) -> dict:
             or any(not isinstance(k, str) or not isinstance(v, str)
                    for k, v in cookies.items())):
         raise CheckerError("RIOT_COOKIES doit contenir un cookie ssid non vide.")
+    ssid = cookies["ssid"].strip()
+    if ssid.lower().startswith("ssid="):
+        ssid = ssid.split("=", 1)[1].strip()
+    if not ssid or "..." in ssid or "…" in ssid:
+        raise CheckerError("Le ssid est vide ou tronqué ; copie sa valeur complète dans GitHub.")
+    if ";" in ssid or any(character.isspace() for character in ssid):
+        raise CheckerError("Le ssid contient un séparateur ou des espaces ; copie uniquement sa valeur complète.")
+    cookies["ssid"] = ssid
     return cookies
 
 
@@ -102,8 +110,8 @@ def main() -> int:
             token = reauth_with_cookies(session)
             if not token:
                 raise CheckerError(
-                    "La session Riot n'est plus acceptée. Récupère un nouveau ssid "
-                    "et remplace le secret RIOT_COOKIES."
+                    "Riot n'a pas délivré de jeton de connexion ; cela ne prouve pas "
+                    "que le cookie a expiré."
                 )
             # Preserve rotation even if fetching the store or delivering it fails.
             save_session(seed, cookies_to_dict(session), path)
