@@ -5,6 +5,8 @@ via un webhook Discord. Le PC peut rester éteint. Région : **Europe (eu)**.
 
 ## Configuration
 
+D’abord, ouvrir la [connexion Riot utilisée par le checker](https://auth.riotgames.com/authorize?redirect_uri=https%3A%2F%2Fplayvalorant.com%2Fopt_in&client_id=play-valorant-web-prod&response_type=token%20id_token&nonce=1&scope=account%20openid) dans le navigateur où le compte est connecté. S’authentifier si Riot le demande, puis attendre le retour vers playvalorant.com. Récupérer ensuite le cookie ssid complet de auth.riotgames.com. La seule connexion à account.riotgames.com ne valide pas ce parcours. Ne jamais partager l’adresse de retour : elle peut contenir un jeton.
+
 Dans votre copie : **Settings → Secrets and variables → Actions**, ajouter :
 
 | Repository secret | Valeur |
@@ -23,8 +25,9 @@ Sélectionner **Valorant Store Check → Run workflow → master → Run workflo
 Un succès affiche « Boutique récupérée ; message enregistré par Discord ».
 La récupération réelle n'est confirmée qu'après ce premier succès.
 
-Les modifications du programme sur master déclenchent également un passage.
-Le workflow n'est jamais lancé sur une pull request d'un contributeur externe.
+Après une modification du programme ou des secrets, lancer un contrôle manuel
+pour confirmer la connexion Riot et la livraison Discord. Les passages sont
+limités à la planification quotidienne et au lancement manuel.
 
 ## Horaire
 
